@@ -32,8 +32,8 @@
  *   data-dates          "false" to keep _time as text instead of an Excel date.
  *
  * The script works from any app: reference it as
- * script="excel_export_demo:export_excel.js" and it loads xlsx.full.min.js
- * from its own app (excel_export_demo/appserver/static/), not the dashboard's.
+ * script="splunk_excel_extract:export_excel.js" and it loads xlsx.full.min.js
+ * from its own app (splunk_excel_extract/appserver/static/), not the dashboard's.
  */
 
 (function () {
@@ -46,10 +46,10 @@
   // that name.
   //
   // The app is NOT taken from the page URL: a dashboard in another app that
-  // loads script="excel_export_demo:export_excel.js" would otherwise look for
+  // loads script="splunk_excel_extract:export_excel.js" would otherwise look for
   // xlsx.full.min.js in its own app and fail with 'Script error for "xlsx"'.
   // ---------------------------------------------------------------------------
-  var APP = 'excel_export_demo';
+  var APP = 'splunk_excel_extract';
   var scripts = document.getElementsByTagName('script');
   for (var s = 0; s < scripts.length; s++) {
     var src = scripts[s].getAttribute('src') || '';

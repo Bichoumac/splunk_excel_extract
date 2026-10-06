@@ -1,7 +1,7 @@
 #
-# Default permissions for Splunk Excel Extraction (excel_export_demo)
+# Default permissions for Splunk Excel Extraction (splunk_excel_extract)
 #
 
 []
-access = read : [ * ], write : [ admin, power ]
+access = read : [ * ], write : [ admin, sc_admin ]
 export = none

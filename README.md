@@ -49,7 +49,7 @@ Splunk cannot produce `.xlsx` files on its own (its export formats are CSV, JSON
 |------|-------------|
 | Splunk | Splunk Enterprise 8.2 or later, or Splunk Cloud (see [Splunk Cloud](#splunk-cloud)) |
 | Dashboard type | **Classic dashboards (Simple XML)** only. Dashboard Studio does not allow custom JavaScript. |
-| JavaScript library | **SheetJS Community Edition 0.18.5** (`xlsx.full.min.js`), bundled in `appserver/static/`. No CDN or Internet access needed. |
+| JavaScript library | **SheetJS Community Edition 0.20.3** (`xlsx.full.min.js`), bundled in `appserver/static/`. No CDN or Internet access needed. |
 | Splunk JS framework | `jquery`, `splunkjs/mvc` and `splunkjs/mvc/simplexml/ready!`, provided by Splunk Web (RequireJS). |
 | Browser | Any current browser (Chrome, Edge, Firefox, Safari). The file is generated and downloaded client-side. |
 | Permissions | Admin rights to install the app. Users need **read** access to the app (granted to all roles by `metadata/default.meta`) so their browser can load the static files. |
@@ -59,10 +59,11 @@ Splunk cannot produce `.xlsx` files on its own (its export formats are CSV, JSON
 ```
 splunk_excel_extract/
 ├── README.md                              This file
+├── LICENSE.txt                            Apache-2.0 license of this app
 ├── appserver/
 │   └── static/
 │       ├── export_excel.js                Export logic (click handler, conversion)
-│       └── xlsx.full.min.js               SheetJS Community Edition 0.18.5
+│       └── xlsx.full.min.js               SheetJS Community Edition 0.20.3
 ├── default/
 │   ├── app.conf                           App metadata (label "Splunk Excel Extraction")
 │   └── data/
@@ -73,8 +74,10 @@ splunk_excel_extract/
 │               └── kpi_drilldown_export_demo.xml    Demo: KPI drilldown + export
 ├── licenses/
 │   └── SheetJS-LICENSE.txt                Apache-2.0 license of SheetJS
-└── metadata/
-    └── default.meta                       Permissions
+├── metadata/
+│   └── default.meta                       Permissions
+└── static/
+    └── appIcon*.png                       App icons (36x36 and 72x72)
 ```
 
 ## Installation
@@ -282,13 +285,11 @@ You cannot copy files to `appserver/static` on Splunk Cloud. Instead:
 
 ## Updating SheetJS
 
-The bundled `xlsx.full.min.js` is the Community Edition **0.18.5**, the last version published on npm. Newer releases are distributed from [cdn.sheetjs.com](https://cdn.sheetjs.com/). To upgrade:
+The bundled `xlsx.full.min.js` is the Community Edition **0.20.3**, downloaded from the official SheetJS CDN (`https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js`). It includes the fixes for CVE-2023-30533 (prototype pollution) and CVE-2024-22363 (ReDoS) that affect versions up to 0.19.2, including 0.18.5, the last version published on npm. To upgrade:
 
-1. Download the newest `xlsx.full.min.js` from the SheetJS CDN.
+1. Download the newest `xlsx.full.min.js` from [cdn.sheetjs.com](https://cdn.sheetjs.com/).
 2. Replace the file in `appserver/static/`.
 3. Bump the static cache and hard-refresh.
-
-Security note: npm versions up to 0.19.2 have published advisories (prototype pollution and ReDoS) affecting the **reading/parsing** of untrusted spreadsheet files. This app only **writes** workbooks and never parses files, so these code paths are not used. Upgrading is still recommended if your security policy requires it.
 
 ## Packaging and uninstalling
 
@@ -297,10 +298,21 @@ Security note: npm versions up to 0.19.2 have published advisories (prototype po
 From the folder that contains `splunk_excel_extract/`:
 
 ```bash
-tar -czf splunk_excel_extract.tgz splunk_excel_extract
+COPYFILE_DISABLE=1 tar --exclude='.*' --owner=0 --group=0 \
+    -czf splunk_excel_extract.tgz splunk_excel_extract
 ```
 
-Splunk accepts `.tgz` and `.spl` (same format, different extension).
+`--exclude='.*'` keeps `.git` and other hidden files out of the package. Splunkbase and AppInspect reject packages that contain them. Splunk accepts `.tgz` and `.spl` (same format, different extension).
+
+### Validate before uploading to Splunkbase
+
+```bash
+pip install splunk-appinspect
+splunk-appinspect inspect splunk_excel_extract.tgz --mode precert \
+    --included-tags cloud --included-tags splunk_appinspect
+```
+
+The expected result is 0 failures. Two warnings are normal: `check_for_splunk_js` (telemetry only) and `check_for_updates_disabled`, which applies only to private apps. Splunkbase apps keep `check_for_updates = true`.
 
 ### Uninstall
 
@@ -314,5 +326,5 @@ Dashboards in other apps that reference `splunk_excel_extract:export_excel.js` s
 
 ## Licenses
 
-- This app's code is provided as an example; adapt it freely.
+- This app is licensed under the Apache License 2.0, Copyright 2026 Bichoumac. See `LICENSE.txt`.
 - **SheetJS Community Edition** is licensed under the Apache License 2.0. The license text is in `licenses/SheetJS-LICENSE.txt`.
