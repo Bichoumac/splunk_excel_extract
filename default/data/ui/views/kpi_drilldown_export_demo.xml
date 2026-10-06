@@ -1,0 +1,58 @@
+<form version="1.1" theme="light" script="excel_export_demo:export_excel.js">
+  <label>KPI Drilldown Export Demo</label>
+
+  <fieldset submitButton="false">
+    <input type="time" token="time_tok">
+      <label>Période</label>
+      <default>
+        <earliest>-24h@h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+  </fieldset>
+
+  <row>
+    <panel>
+      <single>
+        <title>Erreurs (cliquer pour le détail)</title>
+        <search>
+          <query>index=_internal log_level=ERROR | stats count</query>
+          <earliest>$time_tok.earliest$</earliest>
+          <latest>$time_tok.latest$</latest>
+        </search>
+        <option name="drilldown">all</option>
+        <option name="rangeColors">["0x53a051","0xf8be34","0xdc4e41"]</option>
+        <option name="rangeValues">[0,100]</option>
+        <option name="useColors">1</option>
+        <drilldown>
+          <set token="show_detail">true</set>
+        </drilldown>
+      </single>
+    </panel>
+  </row>
+
+  <row depends="$show_detail$">
+    <panel>
+      <title>Détail des erreurs</title>
+      <html>
+        <button class="btn btn-primary excel-export-btn"
+                data-search="search_detail"
+                data-filename="detail_erreurs"
+                data-sheet="Erreurs">Télécharger Excel (.xlsx)</button>
+        &#160;
+        <a href="#" data-unset-token="show_detail">✕ Masquer le tableau</a>
+      </html>
+      <table>
+        <search id="search_detail">
+          <query>index=_internal log_level=ERROR
+| stats count by component, sourcetype
+| sort - count</query>
+          <earliest>$time_tok.earliest$</earliest>
+          <latest>$time_tok.latest$</latest>
+        </search>
+        <option name="count">10</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</form>

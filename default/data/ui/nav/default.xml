@@ -1,0 +1,5 @@
+<nav search_view="search">
+  <view name="excel_export_demo" default="true" />
+  <view name="kpi_drilldown_export_demo" />
+  <view name="search" />
+</nav>

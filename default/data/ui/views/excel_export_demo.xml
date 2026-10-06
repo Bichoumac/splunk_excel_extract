@@ -1,0 +1,67 @@
+<dashboard version="1.1" script="export_excel.js">
+  <label>Excel Export Demo</label>
+  <description>Click a button to download the results as a native .xlsx file instead of a CSV.</description>
+
+  <!--
+    Base search. Its id ("search_export") is what the export button points to
+    through the data-search attribute. It uses generated data (makeresults),
+    so the demo works on any Splunk instance without needing an index.
+  -->
+  <search id="search_export">
+    <query>| makeresults count=250
+| streamstats count AS n
+| eval host="web-0".(n%5+1), status=case(n%10==0,500, n%7==0,404, true(),200), bytes=random()%100000, response_ms=round((random()%2000)/10,1), user_id=substr("000000".n,-6), _time=_time-(n*60)
+| table _time host status bytes response_ms user_id</query>
+    <earliest>-24h@h</earliest>
+    <latest>now</latest>
+  </search>
+
+  <row>
+    <panel>
+      <title>Export</title>
+      <html>
+        <p>
+          The first button exports the full result set of <code>search_export</code> (250 rows).
+          The second one builds a workbook with two sheets, one per search.
+        </p>
+        <p>
+          <button class="btn btn-primary excel-export-btn"
+                  data-search="search_export"
+                  data-filename="events"
+                  data-sheet="Events">Download Excel (.xlsx)</button>
+          &#160;
+          <button class="btn excel-export-btn"
+                  data-search="search_export,search_summary"
+                  data-filename="events_and_summary"
+                  data-sheet="Events,Summary by host">Download Excel (2 sheets)</button>
+        </p>
+      </html>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Events (preview)</title>
+      <table>
+        <search base="search_export">
+          <query>| table _time host status bytes response_ms user_id</query>
+        </search>
+        <option name="count">10</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Summary by host</title>
+      <table>
+        <!-- Post-process search with its own id so the second button can export it -->
+        <search id="search_summary" base="search_export">
+          <query>| stats count AS events, sum(bytes) AS total_bytes, avg(response_ms) AS avg_response_ms by host
+| eval avg_response_ms=round(avg_response_ms,1)
+| sort host</query>
+        </search>
+        <option name="count">10</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</dashboard>
