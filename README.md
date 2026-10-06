@@ -5,7 +5,7 @@ Download Splunk search results as a **native Excel (.xlsx) file** from a button 
 Splunk cannot produce `.xlsx` files on its own (its export formats are CSV, JSON, XML and raw). This app builds the workbook **in the browser** with [SheetJS](https://sheetjs.com/): there is no server-side component, no external service and no change to `limits.conf`.
 
 - App label: **Splunk Excel Extraction**
-- App ID / folder name: `excel_export_demo` (used in URLs and in `script="excel_export_demo:export_excel.js"`)
+- App ID / folder name: `splunk_excel_extract` (used in URLs and in `script="splunk_excel_extract:export_excel.js"`)
 
 ---
 
@@ -39,7 +39,7 @@ Splunk cannot produce `.xlsx` files on its own (its export formats are CSV, JSON
 - Auto-sized columns and a filter on the header row of every sheet.
 - File name with an optional timestamp (`events_20261006_1705.xlsx`).
 - Configured entirely through `data-*` attributes on the button: no JavaScript to write.
-- Reusable from **any app**: a dashboard in another app loads the script with `script="excel_export_demo:export_excel.js"`, and SheetJS is always loaded from this app.
+- Reusable from **any app**: a dashboard in another app loads the script with `script="splunk_excel_extract:export_excel.js"`, and SheetJS is always loaded from this app.
 - No second search: the button reuses the job the dashboard already ran.
 - Two demo dashboards that use data available on any instance (`makeresults` and `index=_internal`).
 
@@ -57,7 +57,7 @@ Splunk cannot produce `.xlsx` files on its own (its export formats are CSV, JSON
 ## App layout
 
 ```
-excel_export_demo/
+splunk_excel_extract/
 ├── README.md                              This file
 ├── appserver/
 │   └── static/
@@ -89,13 +89,13 @@ excel_export_demo/
 ### Option B: Command line
 
 ```bash
-tar -xzf excel_export_demo.tgz -C $SPLUNK_HOME/etc/apps/
+tar -xzf splunk_excel_extract.tgz -C $SPLUNK_HOME/etc/apps/
 $SPLUNK_HOME/bin/splunk restart
 ```
 
 ### Option C: Manual copy
 
-Copy the `excel_export_demo` folder into `$SPLUNK_HOME/etc/apps/` and restart Splunk.
+Copy the `splunk_excel_extract` folder into `$SPLUNK_HOME/etc/apps/` and restart Splunk.
 
 ### Clear the static asset cache
 
@@ -108,7 +108,7 @@ Splunk and browsers cache the files in `appserver/static` aggressively. After in
 
 Both dashboards are in the app navigation menu.
 
-### Excel Export Demo (`excel_export_demo`, default view)
+### Excel Export Demo (`splunk_excel_extract`, default view)
 
 Uses 250 generated rows (`makeresults`).
 
@@ -131,14 +131,14 @@ On the root element of the dashboard (`<dashboard>` or `<form>`):
 
 | Dashboard location | Attribute |
 |--------------------|-----------|
-| Inside this app | `script="export_excel.js"` or `script="excel_export_demo:export_excel.js"` |
-| In any other app | `script="excel_export_demo:export_excel.js"` |
+| Inside this app | `script="export_excel.js"` or `script="splunk_excel_extract:export_excel.js"` |
+| In any other app | `script="splunk_excel_extract:export_excel.js"` |
 
 ```xml
-<form version="1.1" script="excel_export_demo:export_excel.js">
+<form version="1.1" script="splunk_excel_extract:export_excel.js">
 ```
 
-The `app:file` form tells Splunk to load the file from that app's `appserver/static/`, so nothing has to be copied into your own app. To combine with other scripts, separate them with commas: `script="my_app:other.js, excel_export_demo:export_excel.js"`.
+The `app:file` form tells Splunk to load the file from that app's `appserver/static/`, so nothing has to be copied into your own app. To combine with other scripts, separate them with commas: `script="my_app:other.js, splunk_excel_extract:export_excel.js"`.
 
 ### 2. Give the search an `id`
 
@@ -243,7 +243,7 @@ Values are always written as typed cells, never as formulas: a value such as `=S
 
 - The button reuses the job the dashboard already ran and fetches its **full** result set (`count: 0`) through the Splunk JS SDK. No second search is dispatched.
 - If the search is still running, the button shows `Preparing...` and the download starts as soon as results are available.
-- SheetJS is registered in RequireJS under the name `xlsx` (the AMD name SheetJS declares). The path is `../app/<app>/xlsx.full.min`, where `<app>` is the app that serves `export_excel.js` (read from the script's own URL, `excel_export_demo` by default). It does **not** depend on the app of the dashboard.
+- SheetJS is registered in RequireJS under the name `xlsx` (the AMD name SheetJS declares). The path is `../app/<app>/xlsx.full.min`, where `<app>` is the app that serves `export_excel.js` (read from the script's own URL, `splunk_excel_extract` by default). It does **not** depend on the app of the dashboard.
 
 ## Limitations
 
@@ -262,8 +262,8 @@ Values are always written as typed cells, never as formulas: a value such as `=S
 | Symptom | Likely cause and fix |
 |---------|----------------------|
 | Button does nothing | Open the developer console (F12). Check that `export_excel.js` loaded without a 404 and that the dashboard root has the `script` attribute. Bump the static cache and hard-refresh. |
-| Console: `Script error for "xlsx"` | `xlsx.full.min.js` could not be loaded. Open `https://<your-splunk>/en-US/static/app/excel_export_demo/xlsx.full.min.js`: if it fails, the app is not installed or the user's role has no read access to it. Then bump the static cache. |
-| `404` on `export_excel.js` | Wrong `script` attribute. From another app, use `script="excel_export_demo:export_excel.js"`. |
+| Console: `Script error for "xlsx"` | `xlsx.full.min.js` could not be loaded. Open `https://<your-splunk>/en-US/static/app/splunk_excel_extract/xlsx.full.min.js`: if it fails, the app is not installed or the user's role has no read access to it. Then bump the static cache. |
+| `404` on `export_excel.js` | Wrong `script` attribute. From another app, use `script="splunk_excel_extract:export_excel.js"`. |
 | Console: `SheetJS ... could not be loaded` | Same causes as `Script error for "xlsx"`. |
 | Button shows `Search "xxx" not found` | `data-search` does not match any search `id` in the dashboard (case-sensitive). |
 | Button shows `No results to export` | The search finished with zero rows. |
@@ -294,10 +294,10 @@ Security note: npm versions up to 0.19.2 have published advisories (prototype po
 
 ### Build the package
 
-From the folder that contains `excel_export_demo/`:
+From the folder that contains `splunk_excel_extract/`:
 
 ```bash
-tar -czf excel_export_demo.tgz excel_export_demo
+tar -czf splunk_excel_extract.tgz splunk_excel_extract
 ```
 
 Splunk accepts `.tgz` and `.spl` (same format, different extension).
@@ -307,10 +307,10 @@ Splunk accepts `.tgz` and `.spl` (same format, different extension).
 In Splunk Web: **Apps → Manage Apps → Delete** next to the app. Or:
 
 ```bash
-$SPLUNK_HOME/bin/splunk remove app excel_export_demo
+$SPLUNK_HOME/bin/splunk remove app splunk_excel_extract
 ```
 
-Dashboards in other apps that reference `excel_export_demo:export_excel.js` stop exporting once the app is removed.
+Dashboards in other apps that reference `splunk_excel_extract:export_excel.js` stop exporting once the app is removed.
 
 ## Licenses
 
