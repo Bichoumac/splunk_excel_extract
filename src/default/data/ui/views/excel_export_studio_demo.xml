@@ -1,0 +1,87 @@
+<dashboard version="2" theme="light">
+  <label>Excel Export Demo (Dashboard Studio)</label>
+  <description>Dashboard Studio cannot load custom JavaScript: the export is a plain link to the /services/excel_export endpoint.</description>
+  <definition><![CDATA[
+{
+  "title": "Excel Export Demo (Dashboard Studio)",
+  "description": "Dashboard Studio cannot load custom JavaScript: the export is a plain link to the /services/excel_export endpoint.",
+  "inputs": {
+    "input_time": {
+      "type": "input.timerange",
+      "title": "Time range",
+      "options": {
+        "token": "global_time",
+        "defaultValue": "-24h@h,now"
+      }
+    }
+  },
+  "defaults": {
+    "dataSources": {
+      "ds.search": {
+        "options": {
+          "queryParameters": {
+            "earliest": "$global_time.earliest$",
+            "latest": "$global_time.latest$"
+          }
+        }
+      }
+    }
+  },
+  "dataSources": {
+    "ds_events": {
+      "type": "ds.search",
+      "name": "events",
+      "options": {
+        "query": "| makeresults count=250\n| streamstats count AS n\n| eval host=\"web-0\".(n%5+1), status=case(n%10==0,500, n%7==0,404, true(),200), bytes=random()%100000, response_ms=round((random()%2000)/10,1), user_id=substr(\"000000\".n,-6), _time=_time-(n*60)\n| table _time host status bytes response_ms user_id",
+        "enableSmartSources": true
+      }
+    }
+  },
+  "visualizations": {
+    "viz_export": {
+      "type": "splunk.markdown",
+      "options": {
+        "markdown": "### Export to Excel\n\n**1. Reuse the job of the dashboard** (sid of the `events` data source, no second search; the SPL is also passed so the export re-runs it if the job has expired, about 10 minutes after it finished):\n\n[⬇ Download Excel - events](/splunkd/__raw/services/excel_export?sid=$events:job.sid$&search=%7C%20makeresults%20count%3D250%20%7C%20streamstats%20count%20AS%20n%20%7C%20eval%20host%3D%22web-0%22.%28n%255%2B1%29%2C%20status%3Dcase%28n%2510%3D%3D0%2C500%2C%20n%257%3D%3D0%2C404%2C%20true%28%29%2C200%29%2C%20bytes%3Drandom%28%29%25100000%2C%20response_ms%3Dround%28%28random%28%29%252000%29%2F10%2C1%29%2C%20user_id%3Dsubstr%28%22000000%22.n%2C-6%29%2C%20_time%3D_time-%28n%2A60%29%20%7C%20table%20_time%20host%20status%20bytes%20response_ms%20user_id&earliest=$global_time.earliest$&latest=$global_time.latest$&filename=events&sheet=Events)\n\n**2. Run a search from the link** (`search` parameter, URL-encoded SPL, time range from the time picker):\n\n[⬇ Download Excel - summary by host](/splunkd/__raw/services/excel_export?search=%7C%20makeresults%20count%3D250%20%7C%20streamstats%20count%20AS%20n%20%7C%20eval%20host%3D%22web-0%22.%28n%255%2B1%29%2C%20bytes%3Drandom%28%29%25100000%20%7C%20stats%20count%20AS%20events%2C%20sum%28bytes%29%20AS%20total_bytes%20by%20host&earliest=$global_time.earliest$&latest=$global_time.latest$&filename=summary_by_host&sheet=Summary)"
+      }
+    },
+    "viz_table": {
+      "type": "splunk.table",
+      "title": "Events (click a row to download them as .xlsx)",
+      "dataSources": {
+        "primary": "ds_events"
+      },
+      "eventHandlers": [
+        {
+          "type": "drilldown.customUrl",
+          "options": {
+            "url": "/splunkd/__raw/services/excel_export?sid=$events:job.sid$&search=%7C%20makeresults%20count%3D250%20%7C%20streamstats%20count%20AS%20n%20%7C%20eval%20host%3D%22web-0%22.%28n%255%2B1%29%2C%20status%3Dcase%28n%2510%3D%3D0%2C500%2C%20n%257%3D%3D0%2C404%2C%20true%28%29%2C200%29%2C%20bytes%3Drandom%28%29%25100000%2C%20response_ms%3Dround%28%28random%28%29%252000%29%2F10%2C1%29%2C%20user_id%3Dsubstr%28%22000000%22.n%2C-6%29%2C%20_time%3D_time-%28n%2A60%29%20%7C%20table%20_time%20host%20status%20bytes%20response_ms%20user_id&earliest=$global_time.earliest$&latest=$global_time.latest$&filename=events_drilldown&sheet=Events",
+            "newTab": false
+          }
+        }
+      ]
+    }
+  },
+  "layout": {
+    "type": "grid",
+    "options": {
+      "width": 1440
+    },
+    "globalInputs": [
+      "input_time"
+    ],
+    "structure": [
+      {
+        "item": "viz_export",
+        "type": "block",
+        "position": { "x": 0, "y": 0, "w": 1440, "h": 230 }
+      },
+      {
+        "item": "viz_table",
+        "type": "block",
+        "position": { "x": 0, "y": 230, "w": 1440, "h": 420 }
+      }
+    ]
+  }
+}
+  ]]></definition>
+</dashboard>

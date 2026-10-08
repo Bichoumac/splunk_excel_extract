@@ -1,0 +1,5 @@
+# Libraries vendored in src/bin/lib (Python 3.7+ compatible, for Splunk 8.2 to 10.x).
+# Refresh them with:
+#   python3 -m pip install --no-deps --no-compile --upgrade --target src/bin/lib -r requirements.txt
+openpyxl==3.1.2
+et_xmlfile==1.1.0
