@@ -164,7 +164,7 @@ From a browser, through Splunk Web: `/<locale>/splunkd/__raw/services/excel_expo
 
 ### Parameters
 
-Each source is one sheet. Use **either** `sid` **or** `search` in one request, and repeat it for several sheets (`sid=a&sid=b`).
+Each source is one sheet. Use `sid` or `search`, and repeat it for several sheets (`sid=a&sid=b`). Both can be combined, one `search` per `sid`: the search is then only a **fallback**, run when the job no longer exists (expired Dashboard Studio job) or when the sid is empty or an unresolved token.
 
 | Parameter | Repeatable | Default | Description |
 |-----------|-----------|---------|-------------|
@@ -187,7 +187,7 @@ Booleans accept `true/false`, `1/0`, `yes/no`, `on/off`.
 | Status | Body | When |
 |--------|------|------|
 | `200` | The workbook, `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `Content-Disposition: attachment; filename=...` | Success |
-| `400` | `{"error": "...", "status": 400}` | Missing/invalid parameter, both `sid` and `search`, SPL error, failed search |
+| `400` | `{"error": "...", "status": 400}` | Missing/invalid parameter, more `sid` than `search` when combined, SPL error, failed search |
 | `401` | JSON error | Not authenticated |
 | `403` | JSON error | Risky command in the SPL, `search` mode disabled, job of another user |
 | `404` | JSON error | Unknown or expired `sid`, or **no results to export** |
@@ -326,6 +326,18 @@ Dashboard Studio does not run custom JavaScript, so it calls the endpoint with a
 
 For a chained data source (`ds.chain`), pass the sid of the **base** data source and the chain's SPL in `postprocess` (URL-encoded).
 
+> **Studio jobs expire.** Dashboard Studio does not keep its jobs alive: about 10 minutes after a search has finished, splunkd deletes it and a `sid`-only link answers `404 Search job ... not found`. **Always add the search itself to the link** (`sid` + `search`, see below): the endpoint uses the job while it exists and re-runs the search once it has expired. This is what the demo dashboard does.
+
+### Recommended: `sid` with a `search` fallback
+
+```
+/splunkd/__raw/services/excel_export?sid=$events:job.sid$&search=<URL-encoded SPL>&earliest=$global_time.earliest$&latest=$global_time.latest$&filename=hosts
+```
+
+- Job still alive → its results are exported, nothing is re-run.
+- Job expired, token empty or not resolved yet → the search is run with the given time range.
+- The fallback SPL must be the **complete** search (the `postprocess` of the sid is not applied to it).
+
 ### Option 2: run the search from the link (`search`)
 
 When job tokens are not available, put the URL-encoded SPL in the link and pass the time range tokens:
@@ -407,7 +419,7 @@ risky_commands     = collect, delete, dump, map, mcollect, meventcollect, output
 
 - **Memory on the search head.** The whole workbook is built in memory by the handler. Hundreds of thousands of rows work, but very large exports cost CPU and RAM on the search head; aggregate with SPL first and lower `max_rows_per_sheet` if needed.
 - **Excel limits.** 1,048,576 rows and 16,384 columns per sheet, 32,767 characters per cell, 31 characters per sheet name. Rows beyond `max_rows_per_sheet` are dropped.
-- **Job lifetime.** A `sid` export only works while the job exists (dashboard jobs expire after about 10 minutes of inactivity). Reload the dashboard if you get `Search job ... not found`.
+- **Job lifetime.** A `sid` export only works while the job exists (dashboard jobs expire about 10 minutes after they finish; Simple XML keeps them alive while the page is open, Dashboard Studio does not). Add a `search` fallback to Studio links, or reload the dashboard if you get `Search job ... not found`.
 - **Time zone.** `_time` is written as wall-clock time in the user's Splunk time zone; the time zone itself is not stored in the cell.
 - **Dashboard Studio** has no button component: use markdown links or drilldowns.
 
@@ -417,7 +429,8 @@ risky_commands     = collect, delete, dump, map, mcollect, meventcollect, output
 |---------|----------------------|
 | `404` on `/splunkd/__raw/services/excel_export` | Splunk was not restarted after install, or `web.conf` is not loaded. Test splunkd directly: `curl -k -u admin https://localhost:8089/services/excel_export` must answer 400 `Missing parameter`. If splunkd answers but Splunk Web does not, check `$SPLUNK_HOME/bin/splunk btool web list expose:excel_export`. |
 | `{"error": "Missing parameter: 'sid' ..."}` | The link has no `sid`/`search`, often because the token (`$export_sid$`, `$events:job.sid$`) is not set yet: wait for the search to finish, check `enableSmartSources` in Studio. |
-| `Search job ... not found` | The job expired or belongs to another user. Re-run the dashboard. |
+| `Search job ... not found` | The job expired (typical in Dashboard Studio ~10 minutes after the search finished), was cancelled, or belongs to another user. Add a `search` fallback to the link (see [Dashboard Studio](#dashboard-studio)) or reload the dashboard. |
+| HTTP 500 `bad character (49) in reply size` | The Python handler could not be loaded (seen in `splunkd.log`, component `PersistentScript`). Reinstall the app and restart Splunk; if it persists, the error is now returned as JSON (`The app could not load its Python libraries: ...`). |
 | `The search uses commands that are not allowed...` | The SPL contains a command from `risky_commands`. Change the SPL or the setting. |
 | `Timed out waiting for search job` | The search is longer than `job_timeout`. Increase it in `local/excel_export.conf`. |
 | Button does nothing | Open the browser console (F12): `export_excel.js` must load without 404 and the dashboard root must have the `script` attribute. Bump `/_bump` and hard-refresh. |

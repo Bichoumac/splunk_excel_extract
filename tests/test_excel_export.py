@@ -45,6 +45,7 @@ class FakeSplunk(object):
             self.cancelled.append(parts[-2])
             return 200, "{}"
         if parts[-1] == "results":
+            getargs = getargs or postargs            # v2 post-processing is a POST
             job = self.jobs[parts[-2]]
             offset = int(getargs["offset"])
             count = min(int(getargs["count"]), self.max_result_rows)
@@ -141,8 +142,12 @@ class HandlerTests(unittest.TestCase):
         wb = workbook(resp)
         self.assertEqual(wb.sheetnames, ["Events", "Hosts"])
         self.assertIn("_cd", [c.value for c in wb["Events"][1]])
-        searches = [c[2].get("search") for c in self.fake.calls if c[1].endswith("/results")]
+        searches = [(c[2] or c[3]).get("search") for c in self.fake.calls if c[1].endswith("/results")]
         self.assertIn("| sort host", searches)
+        # Post-processing goes through search/v2 (blocked in API v1 on Splunk 10).
+        paths = dict(((c[2] or c[3]).get("search"), c[1]) for c in self.fake.calls if c[1].endswith("/results"))
+        self.assertTrue(paths["| sort host"].startswith("/services/search/v2/jobs/"))
+        self.assertTrue(paths[None].startswith("/services/search/jobs/"))
 
     def test_search_mode_dispatches_and_cancels(self):
         resp = call(self.fake, [("search", "index=main | stats count by host"), ("earliest", "-24h"),
@@ -169,7 +174,7 @@ class HandlerTests(unittest.TestCase):
     def test_errors(self):
         self.assertEqual(call(self.fake, [])["status"], 400)
         self.assertEqual(call(self.fake, [("sid", "../../etc")])["status"], 400)
-        self.assertEqual(call(self.fake, [("sid", "job1"), ("search", "x")])["status"], 400)
+        self.assertEqual(call(self.fake, [("sid", "job1"), ("sid", "job2"), ("search", "x")])["status"], 400)
         self.assertEqual(call(self.fake, [("sid", "unknown")])["status"], 404)
         self.assertEqual(call(self.fake, [("sid", "empty")])["status"], 404)
         self.assertEqual(call(self.fake, [("sid", "failed")])["status"], 400)
@@ -183,6 +188,37 @@ class HandlerTests(unittest.TestCase):
                                                    settings=handler.Settings())
         self.assertEqual(resp["status"], 200)
         self.assertIn("filename*=UTF-8''d%C3%A9tail_erreurs.xlsx", resp["headers"]["Content-Disposition"])
+
+    def test_sid_with_search_fallback(self):
+        # Live job: used as is, nothing dispatched.
+        resp = call(self.fake, [("sid", "job2"), ("search", "| makeresults")])
+        self.assertEqual(resp["status"], 200)
+        self.assertEqual(self.fake.dispatched, [])
+        # Expired job (Dashboard Studio after ~10 minutes): the search is run instead.
+        resp = call(self.fake, [("sid", "expired_123.4"), ("postprocess", "| sort host"),
+                                ("search", "| makeresults"), ("earliest", "-1h")])
+        self.assertEqual(resp["status"], 200)
+        self.assertEqual(self.fake.dispatched[0]["search"], "| makeresults")
+        self.assertEqual(self.fake.dispatched[0]["earliest_time"], "-1h")
+        self.assertEqual(self.fake.cancelled, ["dispatched_0"])
+        searches = [(c[2] or c[3]).get("search") for c in self.fake.calls if c[1].endswith("/results")]
+        self.assertNotIn("| sort host", searches)            # post-process not applied to the fallback
+        # Unresolved Studio token: treated as "no sid".
+        resp = call(self.fake, [("sid", "$events:job.sid$"), ("search", "| makeresults")])
+        self.assertEqual(resp["status"], 200)
+        self.assertEqual(len(self.fake.dispatched), 2)
+
+    def test_expired_sid_without_fallback(self):
+        resp = call(self.fake, [("sid", "expired_123.4")])
+        self.assertEqual(resp["status"], 404)
+        self.assertIn("expired", json.loads(resp["payload"])["error"])
+        resp = call(self.fake, [("sid", "expired_123.4"), ("search", "| makeresults")],
+                    settings=handler.Settings({"allow_search": "false"}))
+        self.assertEqual(resp["status"], 404)
+        self.assertEqual(self.fake.dispatched, [])
+        resp = call(self.fake, [("sid", "job2"), ("search", "| makeresults")],
+                    settings=handler.Settings({"allow_search": "false"}))
+        self.assertEqual(resp["status"], 200)
 
     def test_settings_file(self):
         settings = handler.Settings.load(os.path.join(ROOT, "src"))

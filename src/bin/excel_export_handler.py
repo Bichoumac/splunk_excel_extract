@@ -39,10 +39,19 @@ BIN_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_DIR = os.path.dirname(BIN_DIR)
 APP_NAME = os.path.basename(APP_DIR)
 LIB_DIR = os.path.join(BIN_DIR, "lib")
-if LIB_DIR not in sys.path:
-    sys.path.insert(0, LIB_DIR)
+# Splunk's persistent server loads this file by path: neither bin/ (for
+# xlsx_builder) nor bin/lib (for openpyxl) is on sys.path by default.
+for _path in (LIB_DIR, BIN_DIR):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
-import xlsx_builder  # noqa: E402  (needs LIB_DIR on sys.path for openpyxl)
+try:
+    import xlsx_builder  # noqa: E402
+    IMPORT_ERROR = None
+except Exception:                       # reported by handle() instead of breaking the protocol
+    import traceback
+    xlsx_builder = None
+    IMPORT_ERROR = traceback.format_exc()
 
 try:
     from splunk.persistconn.application import PersistentServerConnectionApplication
@@ -155,7 +164,8 @@ class SplunkClient(object):
         except splunk.AuthorizationFailed:
             raise ExportError("You are not allowed to access %s." % path, 403)
         except splunk.ResourceNotFound:
-            raise ExportError("Not found: %s" % path, 404)
+            # Let the caller turn it into a meaningful message (e.g. expired job).
+            return 404, json.dumps({"messages": [{"type": "ERROR", "text": "Not found: %s" % path}]})
         status = int(response.status)
         if isinstance(content, bytes):
             content = content.decode("utf-8", "replace")
@@ -199,7 +209,9 @@ class SearchRunner(object):
             status, content = self.client.request(
                 "GET", "/services/search/jobs/%s" % quote(sid, safe=""), getargs={"output_mode": "json"})
             if status == 404:
-                raise ExportError("Search job %s not found (expired or not visible to you)." % sid, 404)
+                raise ExportError("Search job %s not found: it has expired (dashboard jobs are kept about "
+                                  "10 minutes), was cancelled, or is not visible to you. Reload the dashboard, "
+                                  "or pass 'search' as well so the export can re-run it." % sid, 404)
             if status >= 300:
                 raise ExportError("Could not read job %s: %s" % (sid, splunk_messages(content)), 502)
             job = json.loads(content)["entry"][0]["content"]
@@ -214,6 +226,19 @@ class SearchRunner(object):
             self.sleep(delay)
             delay = min(delay * 2, 2.0)
 
+    def read_page(self, sid, getargs, postprocess):
+        """Post-processing is refused by the v1 results endpoint on recent Splunk
+        versions ("Postprocessing search is blocked in API v1"): use a POST on
+        search/v2 (v2 only accepts post-processing with POST), and fall back to
+        v1 on versions that do not have it (before 9.0.1)."""
+        quoted = quote(sid, safe="")
+        if postprocess:
+            status, content = self.client.request(
+                "POST", "/services/search/v2/jobs/%s/results" % quoted, postargs=getargs)
+            if status != 404:
+                return status, content
+        return self.client.request("GET", "/services/search/jobs/%s/results" % quoted, getargs=getargs)
+
     def results(self, sid, postprocess=None):
         """Read every result row of a finished job, page by page, so the
         [restapi] maxresultrows limit does not truncate the export."""
@@ -227,8 +252,7 @@ class SearchRunner(object):
                        "count": min(self.settings.page_size, limit - len(rows))}
             if postprocess:
                 getargs["search"] = postprocess
-            status, content = self.client.request(
-                "GET", "/services/search/jobs/%s/results" % quote(sid, safe=""), getargs=getargs)
+            status, content = self.read_page(sid, getargs, bool(postprocess))
             if status == 204 or not content:
                 break
             if status >= 300:
@@ -307,20 +331,29 @@ class ExportRequest(object):
                 return values * count
             return [(values[i] if i < len(values) else "") for i in range(count)]
 
-        self.sids = [s.strip() for s in many("sid") if s.strip()]
         self.searches = [s for s in many("search") if s.strip()]
-        if self.sids and self.searches:
-            raise ExportError("Use either 'sid' or 'search', not both in the same request.")
-        if not self.sids and not self.searches:
-            raise ExportError("Missing parameter: 'sid' (existing search job) or 'search' (SPL to run).")
-        count = len(self.sids) + len(self.searches)
+        sids = [s.strip() for s in many("sid")]
+        if self.searches:
+            # sid + search: the sid is used while the job exists, the search re-runs it
+            # otherwise (Dashboard Studio jobs expire ~10 minutes after they finish).
+            # An empty or unresolved sid token ("$ds:job.sid$") simply means "run the search".
+            if len([s for s in sids if s]) > len(self.searches):
+                raise ExportError("When 'sid' and 'search' are combined, give one 'search' per 'sid' "
+                                  "(the search is run when the job no longer exists).")
+            count = len(self.searches)
+            self.sids = [(sids[i] if i < len(sids) and SID_RE.match(sids[i]) else "") for i in range(count)]
+        else:
+            self.sids = [s for s in sids if s]
+            count = len(self.sids)
+            if not count:
+                raise ExportError("Missing parameter: 'sid' (existing search job) or 'search' (SPL to run).")
+            for sid in self.sids:
+                if not SID_RE.match(sid):
+                    raise ExportError("Invalid sid: %r" % sid)
         if count > settings.max_sheets:
             raise ExportError("Too many sheets requested (%d, max %d)." % (count, settings.max_sheets))
-        for sid in self.sids:
-            if not SID_RE.match(sid):
-                raise ExportError("Invalid sid: %r" % sid)
 
-        self.postprocess = aligned("postprocess", count) if self.sids else [""] * count
+        self.postprocess = aligned("postprocess", count) if any(self.sids) else [""] * count
         self.earliest = aligned("earliest", count)
         self.latest = aligned("latest", count)
 
@@ -328,7 +361,8 @@ class ExportRequest(object):
         if not APP_RE.match(self.app):
             raise ExportError("Invalid app: %r" % self.app)
 
-        if self.searches and not settings.allow_search:
+        self.allow_search = settings.allow_search
+        if self.searches and not settings.allow_search and not all(self.sids):
             raise ExportError("Running a new search through this endpoint is disabled "
                               "(allow_search = false). Pass the 'sid' of an existing job instead.", 403)
         for spl in self.searches + self.postprocess:
@@ -375,16 +409,25 @@ def export(req, runner):
     total = 0
     dispatched = []
     try:
-        if req.sids:
-            jobs = [(sid, req.postprocess[i]) for i, sid in enumerate(req.sids)]
-        else:
-            jobs = []
-            for i, spl in enumerate(req.searches):
-                sid = runner.dispatch(req.user, req.app, spl, req.earliest[i], req.latest[i])
+        for i in range(len(req.sheet_names)):
+            sid = req.sids[i] if i < len(req.sids) else ""
+            postprocess = req.postprocess[i]
+            if sid:
+                try:
+                    runner.wait(sid)
+                except ExportError as err:
+                    if err.status != 404 or not req.searches:
+                        raise
+                    LOG.info("job not found, running the search instead sid=%s user=%s", sid, req.user)
+                    sid = ""
+            if not sid:
+                if not req.allow_search:
+                    raise ExportError("The search job no longer exists and running a new search is "
+                                      "disabled (allow_search = false). Reload the dashboard.", 404)
+                sid = runner.dispatch(req.user, req.app, req.searches[i], req.earliest[i], req.latest[i])
                 dispatched.append(sid)
-                jobs.append((sid, ""))
-        for i, (sid, postprocess) in enumerate(jobs):
-            runner.wait(sid)
+                postprocess = ""          # the search already contains the full SPL
+                runner.wait(sid)
             fields, rows = runner.results(sid, postprocess or None)
             total += len(rows)
             sheets.append(xlsx_builder.SheetData(req.sheet_names[i], fields, rows))
@@ -411,6 +454,10 @@ class ExcelExportHandler(PersistentServerConnectionApplication):
     def handle(self, in_string, client_factory=SplunkClient, settings=None):
         started = time.time()
         user = "-"
+        if IMPORT_ERROR:
+            LOG.error("cannot load xlsx_builder/openpyxl: %s", IMPORT_ERROR)
+            return json_response(500, "The app could not load its Python libraries: %s"
+                                 % IMPORT_ERROR.strip().splitlines()[-1])
         try:
             request = json.loads(in_string)
             method = (request.get("method") or "GET").upper()
