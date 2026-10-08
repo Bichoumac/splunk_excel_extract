@@ -1,147 +1,212 @@
 # Splunk Excel Extraction
 
-Download Splunk search results as a **native Excel (.xlsx) file** from a button in a Simple XML dashboard, instead of the CSV export Splunk offers out of the box.
+Download Splunk search results as a **native Excel (.xlsx) file** from **Simple XML (Classic)** and **Dashboard Studio** dashboards, instead of the CSV export Splunk offers out of the box.
 
-Splunk cannot produce `.xlsx` files on its own (its export formats are CSV, JSON, XML and raw). This app builds the workbook **in the browser** with [SheetJS](https://sheetjs.com/): there is no server-side component, no external service and no change to `limits.conf`.
+Splunk cannot produce `.xlsx` files on its own (its export formats are CSV, JSON, XML and raw). This app adds a REST endpoint, `/services/excel_export`, written in Python with [openpyxl](https://openpyxl.readthedocs.io/). It reads the results of a search job (or runs a search) **with the permissions of the calling user** and returns a ready-to-open workbook.
 
 - App label: **Splunk Excel Extraction**
-- App ID / folder name: `splunk_excel_extract` (used in URLs and in `script="splunk_excel_extract:export_excel.js"`)
+- App ID / folder name: `splunk_excel_extract`
+- Endpoint: `https://<splunk-web>/<locale>/splunkd/__raw/services/excel_export` (browser), `https://<splunkd>:8089/services/excel_export` (REST clients)
 
 ---
 
 ## Table of contents
 
 1. [Features](#features)
-2. [Dependencies and requirements](#dependencies-and-requirements)
-3. [App layout](#app-layout)
+2. [Requirements](#requirements)
+3. [Repository layout](#repository-layout)
 4. [Installation](#installation)
 5. [Demo dashboards](#demo-dashboards)
-6. [Adding an export button to a dashboard](#adding-an-export-button-to-a-dashboard)
-7. [Button attributes reference](#button-attributes-reference)
-8. [How values are converted](#how-values-are-converted)
-9. [How it works](#how-it-works)
-10. [Limitations](#limitations)
-11. [Troubleshooting](#troubleshooting)
-12. [Splunk Cloud](#splunk-cloud)
-13. [Updating SheetJS](#updating-sheetjs)
-14. [Packaging and uninstalling](#packaging-and-uninstalling)
-15. [Licenses](#licenses)
+6. [REST endpoint reference](#rest-endpoint-reference)
+7. [Simple XML: export buttons (export_excel.js)](#simple-xml-export-buttons-export_exceljs)
+8. [Simple XML: plain link, no JavaScript](#simple-xml-plain-link-no-javascript)
+9. [Dashboard Studio](#dashboard-studio)
+10. [Calling the endpoint from scripts](#calling-the-endpoint-from-scripts)
+11. [How values are converted](#how-values-are-converted)
+12. [Configuration (excel_export.conf)](#configuration-excel_exportconf)
+13. [Security](#security)
+14. [Limitations](#limitations)
+15. [Troubleshooting](#troubleshooting)
+16. [Development](#development)
+17. [Packaging, Splunk Cloud and uninstalling](#packaging-splunk-cloud-and-uninstalling)
+18. [Upgrading from 1.x (SheetJS)](#upgrading-from-1x-sheetjs)
+19. [Licenses](#licenses)
 
 ---
 
 ## Features
 
-- One click downloads a real `.xlsx` file. It opens in Excel without a format warning, and accents and Unicode are preserved.
-- Exports any search or post-process search of the dashboard, referenced by its `id`.
-- **Full result set**: the export contains every row of the search, not only the page displayed in the table.
-- **Multi-sheet workbooks**: export several searches into one file, one sheet per search.
-- **Typed cells**: numbers are written as numbers, `_time` as an Excel date, multivalue fields as multi-line cells.
-- Auto-sized columns and a filter on the header row of every sheet.
-- File name with an optional timestamp (`events_20261006_1705.xlsx`).
-- Configured entirely through `data-*` attributes on the button: no JavaScript to write.
-- Reusable from **any app**: a dashboard in another app loads the script with `script="splunk_excel_extract:export_excel.js"`, and SheetJS is always loaded from this app.
-- No second search: the button reuses the job the dashboard already ran.
-- Two demo dashboards that use data available on any instance (`makeresults` and `index=_internal`).
+- Real `.xlsx` files: they open in Excel without a format warning; accents and Unicode are preserved.
+- Works from **Simple XML** (button or plain link) and **Dashboard Studio** (markdown link or drilldown), and from any HTTP client (`curl`, Python, ...).
+- Two modes:
+  - **`sid`**: export a job that already ran (the dashboard's search), no second search;
+  - **`search`**: run an SPL search and export its results.
+- **Full result set**: results are read page by page, so the export is **not** cut at `maxresultrows` (50,000 rows by default) like a normal REST call.
+- **Post-process searches** (Simple XML `base=`) are exported exactly as the panel shows them.
+- **Multi-sheet workbooks**: one sheet per job or search.
+- **Typed cells**: numbers as numbers, `_time` as an Excel date, multivalue fields as multi-line cells, identifiers like `007` kept as text.
+- **Formatting**: bold coloured header, frozen header row, filter on the header, auto-sized columns.
+- Permissions are those of the user: no system credentials, no role escalation.
+- Guard rails: SPL commands that write or send data (`outputlookup`, `sendemail`, `delete`, ...) are refused; the `search` mode can be disabled.
+- Logs in `$SPLUNK_HOME/var/log/splunk/excel_export.log` (searchable in `index=_internal`).
 
-## Dependencies and requirements
+## Requirements
 
 | Item | Requirement |
 |------|-------------|
-| Splunk | Splunk Enterprise 8.2 or later, or Splunk Cloud (see [Splunk Cloud](#splunk-cloud)) |
-| Dashboard type | **Classic dashboards (Simple XML)** only. Dashboard Studio does not allow custom JavaScript. |
-| JavaScript library | **SheetJS Community Edition 0.20.3** (`xlsx.full.min.js`), bundled in `appserver/static/`. No CDN or Internet access needed. |
-| Splunk JS framework | `jquery`, `splunkjs/mvc` and `splunkjs/mvc/simplexml/ready!`, provided by Splunk Web (RequireJS). |
-| Browser | Any current browser (Chrome, Edge, Firefox, Safari). The file is generated and downloaded client-side. |
-| Permissions | Admin rights to install the app. Users need **read** access to the app (granted to all roles by `metadata/default.meta`) so their browser can load the static files. |
+| Splunk | Splunk Enterprise 8.2 or later (Python 3), or Splunk Cloud (see [Splunk Cloud](#splunk-cloud)) |
+| Python | The Python 3 shipped with Splunk (3.7 or later). Nothing to install: **openpyxl 3.1.2** and **et_xmlfile 1.1.0** are bundled in `bin/lib/`. |
+| Dashboards | Simple XML (Classic) and Dashboard Studio. Studio job tokens (`$name:job.sid$`) need a recent Splunk 9.x; the `search` mode works on every version. |
+| Browser | Any current browser (Chrome, Edge, Firefox, Safari). |
+| Permissions | Admin rights to install the app. Users need **read** access to the app (granted to all roles by `metadata/default.meta`) to load `export_excel.js`, and the usual `search` capability to read or run jobs. |
 
-## App layout
+## Repository layout
+
+The Splunk app itself lives in `src/`. Everything else (README, license, tests, build script) is repository material; `build.sh` copies `README.md` and `LICENSE.txt` into the package.
 
 ```
-splunk_excel_extract/
-├── README.md                              This file
-├── LICENSE.txt                            Apache-2.0 license of this app
-├── appserver/
-│   └── static/
-│       ├── export_excel.js                Export logic (click handler, conversion)
-│       └── xlsx.full.min.js               SheetJS Community Edition 0.20.3
-├── default/
-│   ├── app.conf                           App metadata (label "Splunk Excel Extraction")
-│   └── data/
-│       └── ui/
-│           ├── nav/default.xml            App navigation
-│           └── views/
-│               ├── excel_export_demo.xml            Demo: single and multi-sheet export
-│               └── kpi_drilldown_export_demo.xml    Demo: KPI drilldown + export
-├── licenses/
-│   └── SheetJS-LICENSE.txt                Apache-2.0 license of SheetJS
-├── metadata/
-│   └── default.meta                       Permissions
-└── static/
-    └── appIcon*.png                       App icons (36x36 and 72x72)
+splunk_excel_extract/                (git repository)
+├── README.md                        This file
+├── LICENSE.txt                      Apache-2.0 license of this app
+├── build.sh                         Builds dist/splunk_excel_extract-<version>.tgz
+├── requirements.txt                 Versions of the libraries vendored in src/bin/lib
+├── tests/
+│   └── test_excel_export.py         Unit tests (no Splunk needed)
+└── src/                             ← the Splunk app (becomes splunk_excel_extract/)
+    ├── appserver/static/
+    │   └── export_excel.js          Simple XML buttons → calls the endpoint
+    ├── bin/
+    │   ├── excel_export_handler.py  REST handler: parameters, jobs, pagination, response
+    │   ├── xlsx_builder.py          Workbook generation (openpyxl)
+    │   └── lib/                     Bundled openpyxl + et_xmlfile
+    ├── default/
+    │   ├── app.conf
+    │   ├── restmap.conf             Declares /services/excel_export
+    │   ├── web.conf                 Exposes it to Splunk Web (/splunkd/__raw/...)
+    │   ├── excel_export.conf        Endpoint settings
+    │   └── data/ui/
+    │       ├── nav/default.xml
+    │       └── views/
+    │           ├── excel_export_demo.xml          Simple XML: buttons, 2 sheets, plain link
+    │           ├── excel_export_studio_demo.xml   Dashboard Studio: links and drilldown
+    │           └── kpi_drilldown_export_demo.xml  Simple XML: KPI drilldown + export
+    ├── README/
+    │   └── excel_export.conf.spec
+    ├── licenses/                    openpyxl and et_xmlfile licenses (MIT)
+    ├── metadata/default.meta        Permissions
+    └── static/appIcon*.png          App icons
 ```
 
 ## Installation
 
-### Option A: Splunk Web
+### 1. Build the package
 
-1. Package the folder (see [Packaging](#packaging-and-uninstalling)).
-2. In Splunk Web go to **Apps → Manage Apps → Install app from file**.
-3. Select the `.tgz` and click **Upload**.
-4. Restart Splunk if prompted.
-
-### Option B: Command line
+From the repository root (Linux, macOS or WSL):
 
 ```bash
-tar -xzf splunk_excel_extract.tgz -C $SPLUNK_HOME/etc/apps/
+./build.sh
+# -> dist/splunk_excel_extract-2.0.0.tgz
+```
+
+### 2. Install it
+
+**Option A, Splunk Web:** **Apps → Manage Apps → Install app from file**, select the `.tgz`, tick **Upgrade app** if a previous version is installed, click **Upload**, then restart Splunk when prompted.
+
+**Option B, command line:**
+
+```bash
+tar -xzf dist/splunk_excel_extract-2.0.0.tgz -C $SPLUNK_HOME/etc/apps/
 $SPLUNK_HOME/bin/splunk restart
 ```
 
-### Option C: Manual copy
+**Option C, development install:** link or copy `src/` as `$SPLUNK_HOME/etc/apps/splunk_excel_extract` and restart Splunk.
 
-Copy the `splunk_excel_extract` folder into `$SPLUNK_HOME/etc/apps/` and restart Splunk.
+```bash
+ln -s "$(pwd)/src" $SPLUNK_HOME/etc/apps/splunk_excel_extract
+```
 
-### Clear the static asset cache
+> A **restart is required** the first time (and whenever `restmap.conf` or `web.conf` changes) so that splunkd registers the endpoint and Splunk Web exposes it. On a search head cluster, deploy the app from the deployer (`splunk apply shcluster-bundle`).
 
-Splunk and browsers cache the files in `appserver/static` aggressively. After installing, and **every time `export_excel.js` changes**:
+### 3. Clear the static asset cache
 
-1. Open `https://<your-splunk>/en-US/_bump` and click **Bump version**.
-2. Hard-refresh the dashboard (Ctrl+F5 / Cmd+Shift+R).
+Splunk and browsers cache `appserver/static` aggressively. After installing or upgrading, open `https://<your-splunk>/en-US/_bump`, click **Bump version**, then hard-refresh the dashboards (Ctrl+F5 / Cmd+Shift+R).
+
+### 4. Check that it works
+
+1. Open the app and the **Excel Export Demo** dashboard, click **Download Excel (.xlsx)**.
+2. Or, from a shell (replace the credentials):
+
+   ```bash
+   curl -sk -u admin:changeme "https://localhost:8089/services/excel_export" \
+        --data-urlencode "search=| makeresults count=5 | eval n=random()" \
+        -d timestamp=false -o test.xlsx && file test.xlsx
+   # test.xlsx: Microsoft Excel 2007+
+   ```
 
 ## Demo dashboards
 
-Both dashboards are in the app navigation menu.
+All three are in the app navigation menu.
 
-### Excel Export Demo (`splunk_excel_extract`, default view)
+| Dashboard | Type | What it shows |
+|-----------|------|---------------|
+| **Excel Export Demo** (`excel_export_demo`, default view) | Simple XML | Button exporting `search_export` (250 `makeresults` rows); button building a 2-sheet workbook (`Events` + post-process `Summary by host`); a plain link with no JavaScript. |
+| **Excel Export Demo (Dashboard Studio)** (`excel_export_studio_demo`) | Dashboard Studio | Markdown link reusing the job of a data source (`sid`), markdown link running a search (`search`), and a table whose row click downloads its results. |
+| **KPI Drilldown Export Demo** (`kpi_drilldown_export_demo`) | Simple XML | Clicking a Single Value (`ERROR` count in `index=_internal`) reveals a detail table with a **Télécharger Excel (.xlsx)** button. |
 
-Uses 250 generated rows (`makeresults`).
+## REST endpoint reference
 
-- **Download Excel (.xlsx)** exports `search_export` to `events_<timestamp>.xlsx`.
-- **Download Excel (2 sheets)** exports `search_export` and `search_summary` into one workbook with the sheets `Events` and `Summary by host`.
+```
+GET  /services/excel_export?<parameters>
+POST /services/excel_export          (form-encoded or JSON body, same parameters)
+```
 
-### KPI Drilldown Export Demo (`kpi_drilldown_export_demo`)
+From a browser, through Splunk Web: `/<locale>/splunkd/__raw/services/excel_export`, for example `/en-US/splunkd/__raw/services/excel_export`. A path without locale (`/splunkd/__raw/...`) is redirected to the user's locale by Splunk Web.
 
-Uses `index=_internal`, with a time range picker.
+### Parameters
 
-1. A Single Value shows the number of `ERROR` events.
-2. Clicking it sets the token `show_detail` and reveals a table of errors by `component` and `sourcetype`.
-3. Above the table, **Télécharger Excel (.xlsx)** exports the table's search (`search_detail`) to `detail_erreurs_<timestamp>.xlsx`, and **Masquer le tableau** hides the table again.
+Each source is one sheet. Use **either** `sid` **or** `search` in one request, and repeat it for several sheets (`sid=a&sid=b`).
 
-## Adding an export button to a dashboard
+| Parameter | Repeatable | Default | Description |
+|-----------|-----------|---------|-------------|
+| `sid` | yes | | Search job id to export. The job must be visible to the user. If it is still running, the endpoint waits for it (up to `job_timeout`). |
+| `postprocess` | yes, aligned with `sid` | none | Post-process SPL applied to the job results (e.g. `| stats count by host`). An empty value means "none" for that sid. |
+| `search` | yes | | SPL to run. `search ` is prepended if the query does not start with `|` or `search`. The job is cancelled once exported. Refused when `allow_search = false`. |
+| `earliest` / `latest` | yes, aligned with `search` | none (all time) | Time range of `search`, in any Splunk time format (`-24h@h`, `now`, epoch, ...). One value applies to every search. |
+| `app` | no | `default_app` (`search`) | App namespace in which `search` runs (lookups, macros, event types). |
+| `sheet` | yes | `Results`, `Results 2`, ... | Sheet names, in the order of the sources. `\ / ? * [ ] :` are replaced by `_`, names are cut to 31 characters and made unique. |
+| `filename` | no | `splunk_export` | File name without extension. Path and reserved characters are replaced by `_`. |
+| `timestamp` | no | `true` | `false` removes the `_YYYYMMDD_HHMM` suffix (server time) from the file name. |
+| `keep_text` | no | `false` | `true` writes every value as text (no number conversion). |
+| `keep_internal` | no | `false` | `true` keeps every internal field starting with `_`. By default only `_time` and `_raw` are kept. |
+| `dates` | no | `true` | `false` keeps `_time` as its original ISO text instead of an Excel date. |
+
+Booleans accept `true/false`, `1/0`, `yes/no`, `on/off`.
+
+### Responses
+
+| Status | Body | When |
+|--------|------|------|
+| `200` | The workbook, `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `Content-Disposition: attachment; filename=...` | Success |
+| `400` | `{"error": "...", "status": 400}` | Missing/invalid parameter, both `sid` and `search`, SPL error, failed search |
+| `401` | JSON error | Not authenticated |
+| `403` | JSON error | Risky command in the SPL, `search` mode disabled, job of another user |
+| `404` | JSON error | Unknown or expired `sid`, or **no results to export** |
+| `405` | JSON error | Method other than GET/POST |
+| `504` | JSON error | The job did not finish within `job_timeout` |
+
+## Simple XML: export buttons (export_excel.js)
+
+The script turns any element with the class `excel-export-btn` into an export button. It finds the job of the referenced search in the dashboard and posts its `sid` (and post-process SPL, if any) to the endpoint, then saves the returned file. **No second search is run.**
 
 ### 1. Load the script
 
-On the root element of the dashboard (`<dashboard>` or `<form>`):
-
-| Dashboard location | Attribute |
-|--------------------|-----------|
-| Inside this app | `script="export_excel.js"` or `script="splunk_excel_extract:export_excel.js"` |
-| In any other app | `script="splunk_excel_extract:export_excel.js"` |
+On the root element (`<dashboard>` or `<form>`), in this app or **any other app**:
 
 ```xml
 <form version="1.1" script="splunk_excel_extract:export_excel.js">
 ```
 
-The `app:file` form tells Splunk to load the file from that app's `appserver/static/`, so nothing has to be copied into your own app. To combine with other scripts, separate them with commas: `script="my_app:other.js, splunk_excel_extract:export_excel.js"`.
+To combine with other scripts: `script="my_app:other.js, splunk_excel_extract:export_excel.js"`.
 
 ### 2. Give the search an `id`
 
@@ -153,11 +218,9 @@ The `app:file` form tells Splunk to load the file from that app's `appserver/sta
 </search>
 ```
 
-This works for global searches, searches inside a panel (`<table><search id="...">`) and post-process searches (`<search id="..." base="...">`). Exporting a post-process search exports exactly what the table shows, without pagination.
+Global searches, searches inside a panel and post-process searches (`<search id="..." base="...">`, including chains of post-processes) are supported.
 
 ### 3. Add a button
-
-Any element with the class `excel-export-btn` becomes an export button, usually inside an `<html>` panel:
 
 ```xml
 <row>
@@ -172,13 +235,7 @@ Any element with the class `excel-export-btn` becomes an export button, usually 
 </row>
 ```
 
-The `btn` / `btn-primary` classes are Splunk's Bootstrap styles and are optional.
-
-### 4. Reload
-
-Bump the static cache (see above) and reload the dashboard.
-
-### Several searches in one workbook
+Several searches in one workbook:
 
 ```xml
 <button class="btn excel-export-btn"
@@ -187,29 +244,124 @@ Bump the static cache (see above) and reload the dashboard.
         data-filename="weekly_report">Download full report</button>
 ```
 
-Sheet names are matched to the searches in order. Missing names default to `Results`, `Results 2`, and so on.
+### Button attributes
 
-## Button attributes reference
+| Attribute | Default | Endpoint parameter |
+|-----------|---------|--------------------|
+| `data-search` | `search_export` | Comma-separated search ids (case-sensitive), one sheet each → `sid` / `postprocess` |
+| `data-filename` | `splunk_export` | `filename` |
+| `data-sheet` | `Results` | Comma-separated → `sheet` |
+| `data-timestamp` | `true` | `timestamp` |
+| `data-keep-text` | `false` | `keep_text` |
+| `data-keep-internal` | `false` | `keep_internal` |
+| `data-dates` | `true` | `dates` |
 
-All attributes are optional, but `data-search` should always be set.
+While the file is generated the button shows `Preparing...`; errors returned by the endpoint (e.g. `No results to export.`) are shown on the button for 5 seconds and logged in the browser console.
 
-| Attribute | Default | Description |
-|-----------|---------|-------------|
-| `data-search` | `search_export` | `id` of a search or post-process search, or a comma-separated list of ids (one sheet per id, in order). Ids are case-sensitive. |
-| `data-filename` | `splunk_export` | File name without extension. A trailing `.xlsx` is ignored. |
-| `data-sheet` | `Results` | Sheet name, or comma-separated names matching `data-search`. The characters `\ / ? * [ ] :` are replaced by `_`, names are cut to 31 characters and made unique (`Results`, `Results 2`, ...). |
-| `data-timestamp` | `true` | `false` removes the `_YYYYMMDD_HHmm` suffix from the file name. |
-| `data-keep-text` | `false` | `true` writes every value as text (no number conversion). |
-| `data-keep-internal` | `false` | `true` keeps all internal fields starting with `_`. By default only `_time` and `_raw` are kept. |
-| `data-dates` | `true` | `false` keeps `_time` as the original ISO text instead of an Excel date. |
+## Simple XML: plain link, no JavaScript
 
-Constants that are not exposed as attributes can be changed at the top of `export_excel.js`:
+Store the job id in a token and link to the endpoint:
 
-| Constant | Value | Meaning |
-|----------|-------|---------|
-| `TIMEOUT_MS` | 5 minutes | Maximum wait for a running search before giving up |
-| `MAX_COL_WIDTH` | 60 | Maximum column width (characters) |
-| `DATE_FORMAT` | `yyyy-mm-dd hh:mm:ss` | Excel format applied to `_time` |
+```xml
+<search id="search_export">
+  <query>index=main | stats count by host</query>
+  <done>
+    <set token="export_sid">$job.sid$</set>
+  </done>
+</search>
+...
+<html>
+  <a class="btn btn-primary"
+     href="/splunkd/__raw/services/excel_export?sid=$export_sid$&amp;filename=hosts&amp;sheet=Hosts">Download Excel</a>
+</html>
+```
+
+Remember to write `&` as `&amp;` in XML. The link also works in `<drilldown><link target="_blank">...</link></drilldown>`.
+
+## Dashboard Studio
+
+Dashboard Studio does not run custom JavaScript, so it calls the endpoint with a **link**: a markdown link or a **Link to custom URL** drilldown. The browser downloads the file and stays on the dashboard.
+
+### Option 1: reuse the job of a data source (`sid`)
+
+1. Give the data source a `name` and enable job tokens with `"enableSmartSources": true`:
+
+   ```json
+   "dataSources": {
+     "ds_events": {
+       "type": "ds.search",
+       "name": "events",
+       "options": {
+         "query": "index=main | stats count by host",
+         "enableSmartSources": true
+       }
+     }
+   }
+   ```
+
+2. Use the `$events:job.sid$` token in a markdown visualization:
+
+   ```json
+   "viz_export": {
+     "type": "splunk.markdown",
+     "options": {
+       "markdown": "[⬇ Download Excel](/splunkd/__raw/services/excel_export?sid=$events:job.sid$&filename=hosts&sheet=Hosts)"
+     }
+   }
+   ```
+
+   or as a drilldown on any visualization (here a click on a table row):
+
+   ```json
+   "eventHandlers": [
+     {
+       "type": "drilldown.customUrl",
+       "options": {
+         "url": "/splunkd/__raw/services/excel_export?sid=$events:job.sid$&filename=hosts",
+         "newTab": false
+       }
+     }
+   ]
+   ```
+
+For a chained data source (`ds.chain`), pass the sid of the **base** data source and the chain's SPL in `postprocess` (URL-encoded).
+
+### Option 2: run the search from the link (`search`)
+
+When job tokens are not available, put the URL-encoded SPL in the link and pass the time range tokens:
+
+```
+/splunkd/__raw/services/excel_export?search=index%3Dmain%20%7C%20stats%20count%20by%20host&earliest=$global_time.earliest$&latest=$global_time.latest$&app=my_app&filename=hosts
+```
+
+Encode the SPL once, for example with `python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" 'index=main | stats count by host'`. Pass `app=<your app>` if the search uses lookups or macros of that app.
+
+### Several sheets from Studio
+
+Repeat the parameters: `?sid=$errors:job.sid$&sid=$traffic:job.sid$&sheet=Errors&sheet=Traffic&filename=report`.
+
+## Calling the endpoint from scripts
+
+```bash
+# Run a search, 2 sheets, through splunkd (port 8089) with a token
+curl -sk -H "Authorization: Bearer $SPLUNK_TOKEN" "https://splunk:8089/services/excel_export" \
+     --data-urlencode "search=index=_internal log_level=ERROR | stats count by component" \
+     --data-urlencode "search=index=_internal | stats count by sourcetype" \
+     -d earliest=-24h -d sheet=Errors -d sheet=Sourcetypes -d filename=internal \
+     -OJ                                    # save under the name sent by the server
+
+# Export an existing job
+curl -sk -u admin:changeme "https://splunk:8089/services/excel_export?sid=1696761234.123" -o job.xlsx
+```
+
+```python
+import requests
+r = requests.post("https://splunk:8089/services/excel_export", verify=False,
+                  headers={"Authorization": "Bearer " + token},
+                  json={"search": ["index=main | stats count by host"], "earliest": "-7d", "filename": "hosts"})
+r.raise_for_status()
+open("hosts.xlsx", "wb").write(r.content)
+```
 
 ## How values are converted
 
@@ -217,114 +369,107 @@ Constants that are not exposed as attributes can be changed at the top of `expor
 |--------------|------------|
 | Integer or decimal such as `42`, `-3.5` | Number |
 | Value with a leading zero such as `007` or `000123` | Text (identifiers are never altered) |
-| Number with more than 15 digits | Text (Excel keeps only 15 significant digits) |
-| `_time` | Date/time formatted `yyyy-mm-dd hh:mm:ss`, in the browser's local time |
-| Multivalue field | One cell, values separated by line breaks |
+| Number with more than 15 integer digits | Text (Excel keeps only 15 significant digits) |
+| `_time` | Date/time formatted `yyyy-mm-dd hh:mm:ss`, in the **time zone of the Splunk user** (the offset Splunk returns) |
+| Multivalue field | One cell, values separated by line breaks (wrapped) |
 | Empty / null | Empty cell |
 | Text longer than 32,767 characters | Truncated (Excel's limit per cell) |
-| Internal fields other than `_time` and `_raw` (`_bkt`, `_cd`, `_indextime`, ...) | Dropped (unless `data-keep-internal="true"`) |
+| Control characters not allowed in XML | Removed |
+| Value starting with `=` | Text, never a formula |
+| Internal fields other than `_time` and `_raw` (`_bkt`, `_cd`, `_indextime`, ...) | Dropped (unless `keep_internal=true`) |
 
-Values are always written as typed cells, never as formulas: a value such as `=SUM(A1:A9)` stays plain text.
+Columns appear in the order of the search results (use `| table` to choose it).
 
-**About dates.** `_time` is converted to an Excel serial number by the script itself, using the wall-clock time of the user's browser. SheetJS' own date handling is not used because it adds a few seconds of error in time zones that had an unusual UTC offset in 1899 (for example Europe/Paris). Use `data-dates="false"` to keep the original ISO text with its time zone offset.
+## Configuration (excel_export.conf)
 
-## How it works
+Settings are in `default/excel_export.conf`; override them in `local/excel_export.conf` (read on each request, no restart needed). Full description in `README/excel_export.conf.spec`.
 
+```ini
+[settings]
+allow_search       = true      # false: only "sid" exports are allowed
+default_app        = search    # namespace of "search" requests without "app"
+job_timeout        = 300       # seconds to wait for a job to finish
+page_size          = 50000     # rows per request to splunkd (<= maxresultrows)
+max_rows_per_sheet = 1048575   # Excel limit
+max_sheets         = 20
+risky_commands     = collect, delete, dump, map, mcollect, meventcollect, outputcsv, outputlookup, outputtext, run, runshellscript, script, sendalert, sendemail, tscollect
 ```
- Dashboard                                Browser
-┌──────────────────────┐   click   ┌──────────────────────────────────────┐
-│ <button class=       │ ────────▶ │ export_excel.js                      │
-│  "excel-export-btn"> │           │  1. read data-* attributes           │
-└──────────────────────┘           │  2. mvc.Components.get(searchId)     │
-                                   │  3. manager.data('results',          │
-┌──────────────────────┐           │       {count:0, output_mode:         │
-│ <search id="...">    │ ◀──────── │        'json_rows'})                 │
-│ (already running in  │  results  │  4. SheetJS builds the worksheet(s)  │
-│  the dashboard)      │           │  5. XLSX.writeFile() → download      │
-└──────────────────────┘           └──────────────────────────────────────┘
-```
 
-- The button reuses the job the dashboard already ran and fetches its **full** result set (`count: 0`) through the Splunk JS SDK. No second search is dispatched.
-- If the search is still running, the button shows `Preparing...` and the download starts as soon as results are available.
-- SheetJS is registered in RequireJS under the name `xlsx` (the AMD name SheetJS declares). The path is `../app/<app>/xlsx.full.min`, where `<app>` is the app that serves `export_excel.js` (read from the script's own URL, `splunk_excel_extract` by default). It does **not** depend on the app of the dashboard.
+## Security
+
+- **User permissions only.** The handler uses the session token of the caller (`passSystemAuth = false`): it can read only the jobs the user can read, and runs searches with the user's roles, indexes and quotas.
+- **Authentication required** (`requireAuthentication = true`). From Splunk Web, the session cookie authenticates `GET` requests; `POST` requests also need the `X-Splunk-Form-Key` header (CSRF protection), which `export_excel.js` sends.
+- **Forged links.** Because a simple `GET` link can run a search, the `search` and `postprocess` parameters refuse the SPL commands listed in `risky_commands` (commands that write, delete or send data). Set `allow_search = false` if you only want to export existing jobs.
+- **No formula injection.** Values are always written as typed cells; `=...` stays text.
+- The `sid` must match `[A-Za-z0-9_.@:-]`; file names and sheet names are sanitised.
 
 ## Limitations
 
-- **Classic Simple XML only.** Dashboard Studio cannot load custom JavaScript.
-- **Client-side generation.** Memory and CPU of the user's machine are the limit. Very large exports (several hundred thousand cells) can make the browser slow or freeze; aggregate with SPL first.
-- **Splunk result cap.** Rows are fetched through the REST API, which is capped by `maxresultrows` (`limits.conf`, `[restapi]`, default 50,000). Larger result sets are silently cut.
-- **Excel limits.** 1,048,576 rows and 16,384 columns per sheet, 32,767 characters per cell, 31 characters per sheet name.
-- **Basic formatting only.** Header row, auto-sized columns, filter and date format. SheetJS Community Edition does not write cell styles (colours, bold) or frozen panes.
-- **Only searches with an `id`** can be exported. Searches without an id are invisible to the script.
-- **Current state of the dashboard.** The export contains the results as currently run, with the current tokens and time range. A search that has not run yet (for example one depending on an unset token) makes the button wait until the 5-minute timeout.
-- **Time zone.** `_time` is written in the browser's local time; the time zone itself is not stored in the cell.
-- **Security.** A user can export only the data the dashboard already shows them. The export does not bypass any role or index restriction.
+- **Memory on the search head.** The whole workbook is built in memory by the handler. Hundreds of thousands of rows work, but very large exports cost CPU and RAM on the search head; aggregate with SPL first and lower `max_rows_per_sheet` if needed.
+- **Excel limits.** 1,048,576 rows and 16,384 columns per sheet, 32,767 characters per cell, 31 characters per sheet name. Rows beyond `max_rows_per_sheet` are dropped.
+- **Job lifetime.** A `sid` export only works while the job exists (dashboard jobs expire after about 10 minutes of inactivity). Reload the dashboard if you get `Search job ... not found`.
+- **Time zone.** `_time` is written as wall-clock time in the user's Splunk time zone; the time zone itself is not stored in the cell.
+- **Dashboard Studio** has no button component: use markdown links or drilldowns.
 
 ## Troubleshooting
 
 | Symptom | Likely cause and fix |
 |---------|----------------------|
-| Button does nothing | Open the developer console (F12). Check that `export_excel.js` loaded without a 404 and that the dashboard root has the `script` attribute. Bump the static cache and hard-refresh. |
-| Console: `Script error for "xlsx"` | `xlsx.full.min.js` could not be loaded. Open `https://<your-splunk>/en-US/static/app/splunk_excel_extract/xlsx.full.min.js`: if it fails, the app is not installed or the user's role has no read access to it. Then bump the static cache. |
-| `404` on `export_excel.js` | Wrong `script` attribute. From another app, use `script="splunk_excel_extract:export_excel.js"`. |
-| Console: `SheetJS ... could not be loaded` | Same causes as `Script error for "xlsx"`. |
-| Button shows `Search "xxx" not found` | `data-search` does not match any search `id` in the dashboard (case-sensitive). |
-| Button shows `No results to export` | The search finished with zero rows. |
-| Button shows `The search failed.` | The search returned an error; fix the SPL first. |
-| Button shows `Timed out waiting for results.` | The search took more than 5 minutes or never started (unset token). Increase `TIMEOUT_MS` or fix the search. |
-| Changes to the JS have no effect | Static files are cached. Use `/_bump` and a hard refresh. |
-| Fewer rows than expected | `maxresultrows` cap (see [Limitations](#limitations)). |
+| `404` on `/splunkd/__raw/services/excel_export` | Splunk was not restarted after install, or `web.conf` is not loaded. Test splunkd directly: `curl -k -u admin https://localhost:8089/services/excel_export` must answer 400 `Missing parameter`. If splunkd answers but Splunk Web does not, check `$SPLUNK_HOME/bin/splunk btool web list expose:excel_export`. |
+| `{"error": "Missing parameter: 'sid' ..."}` | The link has no `sid`/`search`, often because the token (`$export_sid$`, `$events:job.sid$`) is not set yet: wait for the search to finish, check `enableSmartSources` in Studio. |
+| `Search job ... not found` | The job expired or belongs to another user. Re-run the dashboard. |
+| `The search uses commands that are not allowed...` | The SPL contains a command from `risky_commands`. Change the SPL or the setting. |
+| `Timed out waiting for search job` | The search is longer than `job_timeout`. Increase it in `local/excel_export.conf`. |
+| Button does nothing | Open the browser console (F12): `export_excel.js` must load without 404 and the dashboard root must have the `script` attribute. Bump `/_bump` and hard-refresh. |
+| Button shows `Search "xxx" not found` | `data-search` does not match any search `id` (case-sensitive). |
+| `Export failed: ...` (HTTP 500) | Unexpected error: see `index=_internal source=*excel_export.log` and `source=*splunkd.log* excel_export`. |
+| The file opens as text / JSON | The endpoint returned an error (JSON) instead of the workbook: read the message. |
 
-## Splunk Cloud
+Logs: `$SPLUNK_HOME/var/log/splunk/excel_export.log`, e.g. `index=_internal source=*excel_export.log "export ok"` gives who exported what, how many rows and how long it took.
 
-You cannot copy files to `appserver/static` on Splunk Cloud. Instead:
-
-1. Package the app (including `appserver/static`) as a `.tgz`.
-2. Install it as a **private app** through **Apps → Manage Apps → Install app from file**, or through the Admin Config Service (ACS).
-3. The app goes through **AppInspect** vetting. Custom JavaScript is allowed in private apps; review the report for warnings about the bundled library.
-
-## Updating SheetJS
-
-The bundled `xlsx.full.min.js` is the Community Edition **0.20.3**, downloaded from the official SheetJS CDN (`https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js`). It includes the fixes for CVE-2023-30533 (prototype pollution) and CVE-2024-22363 (ReDoS) that affect versions up to 0.19.2, including 0.18.5, the last version published on npm. To upgrade:
-
-1. Download the newest `xlsx.full.min.js` from [cdn.sheetjs.com](https://cdn.sheetjs.com/).
-2. Replace the file in `appserver/static/`.
-3. Bump the static cache and hard-refresh.
-
-## Packaging and uninstalling
-
-### Build the package
-
-From the folder that contains `splunk_excel_extract/`:
+## Development
 
 ```bash
-COPYFILE_DISABLE=1 tar --exclude='.*' --owner=0 --group=0 \
-    -czf splunk_excel_extract.tgz splunk_excel_extract
+python3 -m unittest discover -s tests -v     # unit tests, no Splunk needed (uses src/bin/lib)
+./build.sh                                   # package
 ```
 
-`--exclude='.*'` keeps `.git` and other hidden files out of the package. Splunkbase and AppInspect reject packages that contain them. Splunk accepts `.tgz` and `.spl` (same format, different extension).
+- `src/bin/xlsx_builder.py` contains the conversion and formatting logic (pure Python + openpyxl).
+- `src/bin/excel_export_handler.py` contains the REST handler; splunkd access goes through `SplunkClient`, replaced by a fake in the tests.
+- To refresh the vendored libraries, keep versions compatible with Python 3.7 (Splunk 9.0–9.2):
 
-### Validate before uploading to Splunkbase
+  ```bash
+  rm -rf src/bin/lib && python3 -m pip install --no-deps --no-compile --target src/bin/lib -r requirements.txt
+  ```
+
+## Packaging, Splunk Cloud and uninstalling
+
+### Validate before uploading
 
 ```bash
 pip install splunk-appinspect
-splunk-appinspect inspect splunk_excel_extract.tgz --mode precert \
+splunk-appinspect inspect dist/splunk_excel_extract-2.0.0.tgz --mode precert \
     --included-tags cloud --included-tags splunk_appinspect
 ```
 
-The expected result is 0 failures. Two warnings are normal: `check_for_splunk_js` (telemetry only) and `check_for_updates_disabled`, which applies only to private apps. Splunkbase apps keep `check_for_updates = true`.
+### Splunk Cloud
+
+Install the package as a **private app** (**Apps → Manage Apps → Install app from file**, or the Admin Config Service). It goes through AppInspect vetting; custom REST handlers in Python 3 are allowed in private apps. Users then call the endpoint through Splunk Web exactly as on Splunk Enterprise (`/splunkd/__raw/services/excel_export`).
 
 ### Uninstall
 
-In Splunk Web: **Apps → Manage Apps → Delete** next to the app. Or:
+**Apps → Manage Apps → Delete**, or `$SPLUNK_HOME/bin/splunk remove app splunk_excel_extract`. Dashboards that reference `splunk_excel_extract:export_excel.js` or the endpoint stop exporting once the app is removed.
 
-```bash
-$SPLUNK_HOME/bin/splunk remove app splunk_excel_extract
-```
+## Upgrading from 1.x (SheetJS)
 
-Dashboards in other apps that reference `splunk_excel_extract:export_excel.js` stop exporting once the app is removed.
+Version 1.x built the workbook in the browser with SheetJS. Version 2.0 replaces it with the server-side endpoint:
+
+- **Existing dashboards keep working unchanged**: same script (`splunk_excel_extract:export_excel.js`), same `excel-export-btn` class, same `data-*` attributes.
+- `xlsx.full.min.js` (SheetJS, ~950 KB) is no longer shipped: the browser does not download or run it any more.
+- Improvements: no 50,000-row cap, formatted header, frozen panes, Dashboard Studio support, `_time` in the user's Splunk time zone instead of the browser's.
+- After upgrading: restart Splunk (new `restmap.conf`/`web.conf`), bump `/_bump`, hard-refresh.
 
 ## Licenses
 
 - This app is licensed under the Apache License 2.0, Copyright 2026 Bichoumac. See `LICENSE.txt`.
-- **SheetJS Community Edition** is licensed under the Apache License 2.0. The license text is in `licenses/SheetJS-LICENSE.txt`.
+- **openpyxl** (MIT) and **et_xmlfile** (MIT) are bundled in `bin/lib/`. Their licenses are in `licenses/`.

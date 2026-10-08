@@ -1,4 +1,4 @@
-<dashboard version="1.1" script="export_excel.js">
+<dashboard version="1.1" script="splunk_excel_extract:export_excel.js">
   <label>Excel Export Demo</label>
   <description>Click a button to download the results as a native .xlsx file instead of a CSV.</description>
 
@@ -14,15 +14,23 @@
 | table _time host status bytes response_ms user_id</query>
     <earliest>-24h@h</earliest>
     <latest>now</latest>
+    <!-- Keeps the sid of the job in a token for the JavaScript-free link below. -->
+    <progress>
+      <set token="export_sid">$job.sid$</set>
+    </progress>
+    <done>
+      <set token="export_sid">$job.sid$</set>
+    </done>
   </search>
 
   <row>
     <panel>
-      <title>Export</title>
+      <title>Export with buttons (export_excel.js)</title>
       <html>
         <p>
           The first button exports the full result set of <code>search_export</code> (250 rows).
           The second one builds a workbook with two sheets, one per search.
+          Both call the <code>/services/excel_export</code> endpoint of the app.
         </p>
         <p>
           <button class="btn btn-primary excel-export-btn"
@@ -34,6 +42,19 @@
                   data-search="search_export,search_summary"
                   data-filename="events_and_summary"
                   data-sheet="Events,Summary by host">Download Excel (2 sheets)</button>
+        </p>
+      </html>
+    </panel>
+    <panel>
+      <title>Export with a plain link (no JavaScript)</title>
+      <html>
+        <p>
+          A link to the endpoint is enough: it reuses the job of <code>search_export</code>
+          through the <code>$$export_sid$$</code> token set in <code>&lt;done&gt;</code>.
+        </p>
+        <p>
+          <a class="btn btn-primary"
+             href="/splunkd/__raw/services/excel_export?sid=$export_sid$&amp;filename=events_link&amp;sheet=Events">Download Excel (link)</a>
         </p>
       </html>
     </panel>

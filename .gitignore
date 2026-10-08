@@ -1,0 +1,6 @@
+dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+src/local/
+src/metadata/local.meta
