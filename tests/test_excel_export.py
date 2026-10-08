@@ -26,15 +26,19 @@ class FakeSplunk(object):
     """Minimal splunkd: jobs with json_rows results, honouring offset/count and
     a maxresultrows cap."""
 
-    def __init__(self, jobs=None, max_result_rows=3):
+    def __init__(self, jobs=None, max_result_rows=3, namespaced=None):
         self.jobs = jobs or {}
         self.max_result_rows = max_result_rows
+        self.namespaced = namespaced or {}      # sid -> only visible under this path prefix
         self.calls = []
         self.dispatched = []
         self.cancelled = []
 
     def request(self, method, path, getargs=None, postargs=None):
         self.calls.append((method, path, getargs, postargs))
+        for sid, prefix in self.namespaced.items():
+            if "/jobs/%s" % sid in path and not path.startswith(prefix):
+                return 404, json.dumps({"messages": [{"type": "ERROR", "text": "Unknown sid."}]})
         parts = path.strip("/").split("/")
         if method == "POST" and parts[-1] == "jobs":
             sid = "dispatched_%d" % len(self.dispatched)
@@ -183,6 +187,24 @@ class HandlerTests(unittest.TestCase):
                                                    settings=handler.Settings())
         self.assertEqual(resp["status"], 200)
         self.assertIn("filename*=UTF-8''d%C3%A9tail_erreurs.xlsx", resp["headers"]["Content-Disposition"])
+
+    def test_sid_namespace(self):
+        self.assertEqual(handler.sid_namespace("admin__admin__search__search1_1696761234.5"), ("admin", "search"))
+        self.assertEqual(handler.sid_namespace("scheduler__bob__my_app__RMD5abc_at_1696761234_7"), ("bob", "my_app"))
+        self.assertEqual(handler.sid_namespace(
+            "admin__admin_c3BsdW5rX2V4Y2VsX2V4dHJhY3Q__RMD592d84e3edbf83d97_1791442531.22"),
+            ("admin", "splunk_excel_extract"))
+        self.assertEqual(handler.sid_namespace("1696761234.123"), (None, None))
+
+    def test_job_only_visible_in_its_namespace(self):
+        # Dashboard Studio job dispatched in a private app: /services/search/jobs/<sid> answers 404.
+        sid = "admin__admin_c3BsdW5rX2V4Y2VsX2V4dHJhY3Q__RMD592d84e3edbf83d97_1791442531.22"
+        fake = FakeSplunk({sid: {"fields": ["host"], "rows": [["web-01"]]}},
+                          namespaced={sid: "/servicesNS/admin/splunk_excel_extract/"})
+        resp = call(fake, [("sid", sid)])
+        self.assertEqual(resp["status"], 200)
+        results = [c[1] for c in fake.calls if c[1].endswith("/results")]
+        self.assertTrue(results[0].startswith("/servicesNS/admin/splunk_excel_extract/search/jobs/"))
 
     def test_settings_file(self):
         settings = handler.Settings.load(os.path.join(ROOT, "src"))

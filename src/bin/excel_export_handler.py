@@ -155,7 +155,7 @@ class SplunkClient(object):
         except splunk.AuthorizationFailed:
             raise ExportError("You are not allowed to access %s." % path, 403)
         except splunk.ResourceNotFound:
-            raise ExportError("Not found: %s" % path, 404)
+            return 404, json.dumps({"messages": [{"type": "ERROR", "text": "Not found: %s" % path}]})
         status = int(response.status)
         if isinstance(content, bytes):
             content = content.decode("utf-8", "replace")
@@ -170,12 +170,72 @@ def splunk_messages(content):
         return (content or "")[:300]
 
 
+def sid_namespace(sid):
+    """Owner and app encoded in a sid, or (None, None).
+
+    admin__admin__search__search1_1696761234.5          -> (admin, search)
+    scheduler__admin__search__RMD5..._at_1696761234_7   -> (admin, search)
+    admin__admin_c3BsdW5rX2V4Y2VsX2V4dHJhY3Q__RMD5...   -> (admin, splunk_excel_extract)
+    (app names with special characters are base64-encoded after a single "_")
+    """
+    parts = sid.split("__")
+    if len(parts) >= 4 and parts[1] and APP_RE.match(parts[2]):
+        return parts[1], parts[2]
+    if len(parts) >= 3 and "_" in parts[1]:
+        owner, encoded = parts[1].rsplit("_", 1)
+        try:
+            app = base64.b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None, None
+        if owner and APP_RE.match(app):
+            return owner, app
+    return None, None
+
+
 class SearchRunner(object):
-    def __init__(self, client, settings, sleep=time.sleep, clock=time.time):
+    def __init__(self, client, settings, user="-", app=None, sleep=time.sleep, clock=time.time):
         self.client = client
         self.settings = settings
+        self.user = user
+        self.app = app
         self.sleep = sleep
         self.clock = clock
+        self.job_paths = {}
+
+    def candidate_paths(self, sid):
+        """Jobs dispatched in a private app (export = none), as Dashboard Studio
+        does, are not always visible through /services/search/jobs/<sid>: try the
+        namespace encoded in the sid first, then the generic ones."""
+        quoted = quote(sid, safe="")
+        paths = []
+        owner, app = sid_namespace(sid)
+        if owner and app:
+            paths.append("/servicesNS/%s/%s/search/jobs/%s" % (quote(owner, safe=""), quote(app, safe=""), quoted))
+        if self.app:
+            paths.append("/servicesNS/%s/%s/search/jobs/%s" % (quote(self.user, safe=""), quote(self.app, safe=""), quoted))
+        paths.append("/services/search/jobs/%s" % quoted)
+        paths.append("/servicesNS/-/-/search/jobs/%s" % quoted)
+        unique = []
+        for path in paths:
+            if path not in unique:
+                unique.append(path)
+        return unique
+
+    def job_path(self, sid):
+        """Find the REST path under which the job is visible. Returns (path, status, content)."""
+        if sid in self.job_paths:
+            path = self.job_paths[sid]
+            status, content = self.client.request("GET", path, getargs={"output_mode": "json"})
+            return path, status, content
+        tried = []
+        for path in self.candidate_paths(sid):
+            status, content = self.client.request("GET", path, getargs={"output_mode": "json"})
+            if status != 404:
+                self.job_paths[sid] = path
+                return path, status, content
+            tried.append(path)
+        LOG.warning("job not found sid=%s user=%s tried=%s", sid, self.user, ", ".join(tried))
+        return None, 404, content
 
     def dispatch(self, user, app, search, earliest, latest):
         query = search.strip()
@@ -196,10 +256,10 @@ class SearchRunner(object):
         deadline = self.clock() + self.settings.job_timeout
         delay = 0.2
         while True:
-            status, content = self.client.request(
-                "GET", "/services/search/jobs/%s" % quote(sid, safe=""), getargs={"output_mode": "json"})
+            path, status, content = self.job_path(sid)
             if status == 404:
-                raise ExportError("Search job %s not found (expired or not visible to you)." % sid, 404)
+                raise ExportError("Search job %s not found: it has expired, was cancelled, or is not "
+                                  "visible to you. Reload the dashboard and try again." % sid, 404)
             if status >= 300:
                 raise ExportError("Could not read job %s: %s" % (sid, splunk_messages(content)), 502)
             job = json.loads(content)["entry"][0]["content"]
@@ -227,8 +287,8 @@ class SearchRunner(object):
                        "count": min(self.settings.page_size, limit - len(rows))}
             if postprocess:
                 getargs["search"] = postprocess
-            status, content = self.client.request(
-                "GET", "/services/search/jobs/%s/results" % quote(sid, safe=""), getargs=getargs)
+            path = self.job_paths.get(sid) or "/services/search/jobs/%s" % quote(sid, safe="")
+            status, content = self.client.request("GET", path + "/results", getargs=getargs)
             if status == 204 or not content:
                 break
             if status >= 300:
@@ -261,8 +321,8 @@ class SearchRunner(object):
 
     def cancel(self, sid):
         try:
-            self.client.request("POST", "/services/search/jobs/%s/control" % quote(sid, safe=""),
-                                postargs={"action": "cancel"})
+            path = self.job_paths.get(sid) or "/services/search/jobs/%s" % quote(sid, safe="")
+            self.client.request("POST", path + "/control", postargs={"action": "cancel"})
         except Exception:                           # best effort cleanup
             LOG.warning("could not cancel job sid=%s", sid)
 
@@ -424,7 +484,7 @@ class ExcelExportHandler(PersistentServerConnectionApplication):
 
             settings = settings or Settings.load()
             req = ExportRequest(collect_params(request), settings, user)
-            runner = SearchRunner(client_factory(token), settings)
+            runner = SearchRunner(client_factory(token), settings, user=user, app=req.app)
             data, total = export(req, runner)
             LOG.info("export ok user=%s app=%s sheets=%d rows=%d bytes=%d file=%s duration=%.2fs",
                      user, req.app, len(req.sheet_names), total, len(data), req.filename,
